@@ -1,14 +1,17 @@
 #!/bin/bash
 set -euxo pipefail
+ray stop
 
 HDFS_HOME=/gpfs/public/mmodal/users/vito
 BASE_MODEL=Qwen2.5-Math-7B
 RUN_NAME=Qwen2.5-Math-7B_ppo_from_base_math_lv35
 WORKING_DIR=$HDFS_HOME/code/simpleRL-reason
-GPU_PER_NODE=2
+GPU_PER_NODE=8
+CPU_PER_NODE=128
 
 # Read distributed environment variables
 NPROC_PER_NODE=${NPROC_PER_NODE:-$GPU_PER_NODE}
+NUM_CPU_PER_NODE=${NUM_CPU_PER_NODE:-$CPU_PER_NODE}
 NNODES=${MLP_WORKER_NUM:-${WORLD_SIZE:-1}}
 NODE_RANK=${MLP_WORKER_RACK_RANK_INDEX:-${MLP_ROLE_INDEX:-${RANK:-0}}}
 MASTER_ADDR=${MLP_WORKER_0_HOST:-${MASTER_ADDR:-127.0.0.1}}
@@ -40,7 +43,7 @@ if [ "$NODE_RANK" -eq 0 ]; then
     ray start --head \
         --node-ip-address=$MASTER_ADDR \
         --port=$RAY_PORT \
-        --num-cpus=$NPROC_PER_NODE \
+        --num-gpus=$NPROC_PER_NODE \
         --block &
 
     # Wait for Ray head node to be ready
@@ -49,17 +52,17 @@ if [ "$NODE_RANK" -eq 0 ]; then
     # Submit the Ray job from the head node
     # TODO: Change this.
    ray job submit --address="http://127.0.0.1:8265" \
-      --runtime-env-json='{"working_dir": "${WORKING_DIR}", "pip": ["ray==2.12.0", "latex2sympy2", "timeout_decorator"]}' \
+      --no-wait \
       -- python3 $WORKING_DIR/train/openrlhf/cli/train_ppo_ray_box.py \
       --ref_num_nodes 1 \
-      --ref_num_gpus_per_node $GPU_PER_NODE \
+      --ref_num_gpus_per_node 2 \
       --reward_num_nodes 0 \
       --reward_num_gpus_per_node 0 \
       --critic_num_nodes 1 \
-      --critic_num_gpus_per_node $GPU_PER_NODE \
+      --critic_num_gpus_per_node 2 \
       --actor_num_nodes 1 \
-      --actor_num_gpus_per_node $GPU_PER_NODE \
-      --vllm_num_engines 16 \
+      --actor_num_gpus_per_node 2 \
+      --vllm_num_engines 2 \
       --vllm_tensor_parallel_size 1 \
       --colocate_actor_ref \
       --pretrain $HDFS_HOME/$BASE_MODEL \
@@ -91,11 +94,12 @@ if [ "$NODE_RANK" -eq 0 ]; then
       --wandb_project vito-r1 \
       --wandb_run_name $RUN_NAME \
       --ckpt_path $HDFS_HOME/checkpoints/$RUN_NAME  \
-      --max_ckpt_num 20000
+      --max_ckpt_num 20000 \
+      --adam_offload
 else
     echo "Starting WORKER node $NODE_RANK"
     sleep $WAIT_INTERVAL_HEAD
     ray start --address "$RAY_HEAD_IP" \
-        --num-cpus=$NPROC_PER_NODE \
+        --num-gpus=$NPROC_PER_NODE \
         --block
 fi
